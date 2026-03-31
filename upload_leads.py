@@ -9,7 +9,9 @@
 # Импорт необходимых библиотек
 import time  # Для создания задержек между запросами
 import os    # Для работы с файловой системой
+from datetime import datetime  # Для получения текущей даты
 from typing import Dict, Any  # Для типизации данных
+from zoneinfo import ZoneInfo  # Для часового пояса Москвы
 
 import requests  # Для HTTP-запросов в Битрикс24
 import pandas as pd  # Для работы с Excel файлами
@@ -21,6 +23,17 @@ from setup import logger  # Логгер для записи событий
 
 # Загружаем переменные окружения из .env (если файл существует)
 load_dotenv()
+
+
+def build_lead_url(webhook_url: str, lead_id: str | int) -> str:
+    """Собирает ссылку на карточку лида по URL вебхука и ID лида."""
+    portal_url = webhook_url.split("/rest/", maxsplit=1)[0].rstrip("/")
+    return f"{portal_url}/crm/lead/details/{lead_id}/"
+
+
+def build_api_method_url(webhook_url: str, method: str) -> str:
+    """Собирает полный URL метода API Битрикс24."""
+    return f"{webhook_url.rstrip('/')}/{method}"
 
 
 def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = None) -> bool:
@@ -51,15 +64,18 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
 
         # Получаем телефон из данных
         phone = lead_data.get("phone", "")
+        title_date = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d%m%Y")
 
         # Формируем данные для создания лида
         lead_payload = {
             "fields": {
-                "TITLE": f"LR_конк_ {phone}",  # Название лида
-                "PHONE": [{"VALUE": phone, "VALUE_TYPE": "WORK"}],  # Телефон
-                "SOURCE_ID": "106",
-                "STATUS_ID": "UC_LF7L5W",
-                "ASSIGNED_BY_ID": "20140",
+                "TITLE": f"Перехват лидов {title_date}",  # Название лида с датой по Москве
+                "PHONE": [{"VALUE": phone, "VALUE_TYPE": "MOBILE"}],  # Телефон
+                # Значения настроены под текущий портал клиента.
+                "SOURCE_ID": "15",
+                "STATUS_ID": "NEW",
+                "UF_CRM_ROISTAT": "парсинг",
+                "ASSIGNED_BY_ID": "1",
             }
         }
 
@@ -71,8 +87,9 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
         logger.info(f"Данные лида: {lead_payload}")
 
         # Отправляем запрос в Битрикс24
+        method_url = build_api_method_url(config["webhook_url"], "crm.lead.add")
         response = requests.post(
-            config["webhook_url"],
+            method_url,
             json=lead_payload,
             headers={"Content-Type": "application/json"},
             timeout=10,
@@ -80,29 +97,42 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
 
         # Логируем ответ от сервера для отладки
         logger.info(f"Ответ сервера: {response.status_code} - {response.text}")
+        result = response.json()
 
         if 200 <= response.status_code < 300:
-            result = response.json()
+            if result.get("error"):
+                error_message = (
+                    "Ошибка API Битрикс24 при создании лида: "
+                    f"{result.get('error_description') or result.get('error')}"
+                )
+                logger.error(error_message)
+                print(error_message)
+                return False
+
             lead_id = result.get("result")
 
             if not lead_id:
                 raise ValueError("Не удалось получить ID лида из ответа Битрикс24")
 
-            logger.info(f"Лид успешно создан в Битрикс24, ID: {lead_id}")
+            lead_url = build_lead_url(config["webhook_url"], lead_id)
+            logger.info(f"Лид успешно создан в Битрикс24: {lead_url}")
 
             return True
         else:
+            api_error = result.get("error_description") or result.get("error") or response.text
             error_message = (
                 f"Ошибка при создании лида. Код ответа: {response.status_code}, "
-                f"ответ: {response.text}"
+                f"ответ API: {api_error}"
             )
             logger.error(error_message)
+            print(error_message)
 
             return False
 
     except Exception as e:
         error_message = f"Ошибка при отправке данных в Битрикс24: {e}"
         logger.error(error_message)
+        print(error_message)
 
         return False
 
@@ -131,17 +161,25 @@ def read_leads_from_excel(file_path: str) -> list[Dict[str, Any]]:
         for index, row in df.iterrows():
             # Получаем телефон и убираем лишние пробелы
             phone = str(row['Телефон']).strip()
+            comment = ""
+
+            if "Комментарий" in df.columns:
+                raw_comment = row["Комментарий"]
+                if pd.notna(raw_comment):
+                    comment = str(raw_comment).strip()
             
             # Пропускаем пустые строки и строки с nan (Not a Number)
             if phone and phone.lower() != 'nan':
                 # Убираем .0 из номера, если телефон был распознан как число
                 phone = phone.replace('.0', '')
                 
-                # Формируем данные лида (телефон)
-                # Остальные поля (источник, этап, ответственный) настроены в bitrix24.py
+                # Формируем данные лида из строки Excel.
                 lead_data = {
                     'phone': phone
                 }
+
+                if comment:
+                    lead_data["comments"] = comment
                 
                 leads.append(lead_data)
                     
@@ -248,8 +286,11 @@ def main():
         # Показываем информацию о найденных лидах
         print(f"Найдено {len(leads)} лидов.")
         print("\nПример первых 3 лидов:")
-        for lead in leads[:3]:
-            print(f"- Телефон: {lead['phone']}")
+        for index, lead in enumerate(leads[:3], start=1):
+            print(f"\nЛид {index}:")
+            print(f"Телефон: {lead['phone']}")
+            if lead.get("comments"):
+                print(f"Комментарий: {lead['comments']}")
             print("-" * 50)
             
         # Запрашиваем подтверждение на загрузку

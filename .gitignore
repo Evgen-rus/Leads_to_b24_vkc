@@ -49,3 +49,6 @@ ENV/
 credentials/
 database/
 amo/tokens.json
+
+поля.txt
+статус.txt
