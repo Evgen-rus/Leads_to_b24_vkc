@@ -36,7 +36,10 @@ def build_api_method_url(webhook_url: str, method: str) -> str:
     return f"{webhook_url.rstrip('/')}/{method}"
 
 
-def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = None) -> bool:
+def send_to_bitrix24(
+    lead_data: Dict[str, Any],
+    config: Dict[str, str] | None = None,
+) -> str | None:
     """
     Отправляет данные лида в Битрикс24 через REST API.
 
@@ -45,7 +48,7 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
         config (dict, optional): Дополнительные настройки для Битрикс24
 
     Returns:
-        bool: True, если отправка прошла успешно, иначе False
+        str | None: Ссылка на созданный лид или None при ошибке
     """
     try:
         # Если конфиг не передан, пробуем взять URL вебхука только из переменной окружения
@@ -56,7 +59,7 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
                     "BITRIX_WEBHOOK_URL не задан. "
                     "Укажите URL вебхука в .env или передайте его через параметр config."
                 )
-                return False
+                return None
 
             config = {
                 "webhook_url": webhook_url
@@ -107,7 +110,7 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
                 )
                 logger.error(error_message)
                 print(error_message)
-                return False
+                return None
 
             lead_id = result.get("result")
 
@@ -117,7 +120,7 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
             lead_url = build_lead_url(config["webhook_url"], lead_id)
             logger.info(f"Лид успешно создан в Битрикс24: {lead_url}")
 
-            return True
+            return lead_url
         else:
             api_error = result.get("error_description") or result.get("error") or response.text
             error_message = (
@@ -127,14 +130,14 @@ def send_to_bitrix24(lead_data: Dict[str, Any], config: Dict[str, str] | None = 
             logger.error(error_message)
             print(error_message)
 
-            return False
+            return None
 
     except Exception as e:
         error_message = f"Ошибка при отправке данных в Битрикс24: {e}"
         logger.error(error_message)
         print(error_message)
 
-        return False
+        return None
 
 def read_leads_from_excel(file_path: str) -> list[Dict[str, Any]]:
     """
@@ -205,9 +208,10 @@ def upload_leads_to_bitrix(leads: list[Dict[str, Any]], config: Dict[str, str]) 
     for index, lead in enumerate(leads, 1):
         try:
             # Отправляем лид в Битрикс24 через функцию send_to_bitrix24
-            if send_to_bitrix24(lead, config):
+            lead_url = send_to_bitrix24(lead, config)
+            if lead_url:
                 success += 1
-                print(f"Успешно создан лид {index}/{total}: {lead['phone']}")
+                print(f"Успешно создан лид {lead['phone']} {lead_url}")
             else:
                 print(f"Не удалось создать лид {index}/{total}: {lead['phone']}")
             
