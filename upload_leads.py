@@ -24,6 +24,9 @@ from setup import logger  # Логгер для записи событий
 # Загружаем переменные окружения из .env (если файл существует)
 load_dotenv()
 
+BITRIX_MAX_RETRIES = int(os.getenv("BITRIX_MAX_RETRIES", "3"))
+BITRIX_RETRY_BASE_DELAY = float(os.getenv("BITRIX_RETRY_BASE_DELAY", "1"))
+
 
 def build_lead_url(webhook_url: str, lead_id: str | int) -> str:
     """Собирает ссылку на карточку лида по URL вебхука и ID лида."""
@@ -34,6 +37,11 @@ def build_lead_url(webhook_url: str, lead_id: str | int) -> str:
 def build_api_method_url(webhook_url: str, method: str) -> str:
     """Собирает полный URL метода API Битрикс24."""
     return f"{webhook_url.rstrip('/')}/{method}"
+
+
+def is_retryable_status(status_code: int) -> bool:
+    """Проверяет, стоит ли повторить запрос по коду ответа."""
+    return status_code == 429 or 500 <= status_code < 600
 
 
 def send_to_bitrix24(
@@ -89,47 +97,85 @@ def send_to_bitrix24(
         logger.info(f"Отправка запроса на создание лида в Битрикс24")
         logger.info(f"Данные лида: {lead_payload}")
 
-        # Отправляем запрос в Битрикс24
         method_url = build_api_method_url(config["webhook_url"], "crm.lead.add")
-        response = requests.post(
-            method_url,
-            json=lead_payload,
-            headers={"Content-Type": "application/json"},
-            timeout=10,
-        )
 
-        # Логируем ответ от сервера для отладки
-        logger.info(f"Ответ сервера: {response.status_code} - {response.text}")
-        result = response.json()
-
-        if 200 <= response.status_code < 300:
-            if result.get("error"):
-                error_message = (
-                    "Ошибка API Битрикс24 при создании лида: "
-                    f"{result.get('error_description') or result.get('error')}"
+        for attempt in range(1, BITRIX_MAX_RETRIES + 1):
+            try:
+                response = requests.post(
+                    method_url,
+                    json=lead_payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=10,
                 )
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ) as error:
+                if attempt < BITRIX_MAX_RETRIES:
+                    delay = BITRIX_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                    retry_message = (
+                        f"Временная ошибка сети при создании лида {phone}: {error}. "
+                        f"Повтор через {delay:.1f} сек. "
+                        f"(попытка {attempt + 1}/{BITRIX_MAX_RETRIES})"
+                    )
+                    logger.warning(retry_message)
+                    print(retry_message)
+                    time.sleep(delay)
+                    continue
+
+                error_message = f"Ошибка при отправке данных в Битрикс24: {error}"
                 logger.error(error_message)
                 print(error_message)
                 return None
 
-            lead_id = result.get("result")
+            logger.info(f"Ответ сервера: {response.status_code} - {response.text}")
 
-            if not lead_id:
-                raise ValueError("Не удалось получить ID лида из ответа Битрикс24")
+            try:
+                result = response.json()
+            except ValueError:
+                result = {}
 
-            lead_url = build_lead_url(config["webhook_url"], lead_id)
-            logger.info(f"Лид успешно создан в Битрикс24: {lead_url}")
+            if 200 <= response.status_code < 300:
+                if result.get("error"):
+                    error_message = (
+                        "Ошибка API Битрикс24 при создании лида: "
+                        f"{result.get('error_description') or result.get('error')}"
+                    )
+                    logger.error(error_message)
+                    print(error_message)
+                    return None
 
-            return lead_url
-        else:
+                lead_id = result.get("result")
+
+                if not lead_id:
+                    raise ValueError("Не удалось получить ID лида из ответа Битрикс24")
+
+                lead_url = build_lead_url(config["webhook_url"], lead_id)
+                logger.info(f"Лид успешно создан в Битрикс24: {lead_url}")
+
+                return lead_url
+
             api_error = result.get("error_description") or result.get("error") or response.text
+
+            if is_retryable_status(response.status_code) and attempt < BITRIX_MAX_RETRIES:
+                delay = BITRIX_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                retry_message = (
+                    f"Временная ошибка API при создании лида {phone}. "
+                    f"Код ответа: {response.status_code}, ответ API: {api_error}. "
+                    f"Повтор через {delay:.1f} сек. "
+                    f"(попытка {attempt + 1}/{BITRIX_MAX_RETRIES})"
+                )
+                logger.warning(retry_message)
+                print(retry_message)
+                time.sleep(delay)
+                continue
+
             error_message = (
                 f"Ошибка при создании лида. Код ответа: {response.status_code}, "
                 f"ответ API: {api_error}"
             )
             logger.error(error_message)
             print(error_message)
-
             return None
 
     except Exception as e:
@@ -211,7 +257,7 @@ def upload_leads_to_bitrix(leads: list[Dict[str, Any]], config: Dict[str, str]) 
             lead_url = send_to_bitrix24(lead, config)
             if lead_url:
                 success += 1
-                print(f"Успешно создан лид {lead['phone']} {lead_url}")
+                print(f"Создан лид {lead['phone']} {lead_url}")
             else:
                 print(f"Не удалось создать лид {index}/{total}: {lead['phone']}")
             
