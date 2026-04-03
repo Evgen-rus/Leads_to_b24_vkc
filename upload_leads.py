@@ -19,13 +19,14 @@ from tkinter import Tk, filedialog  # Для создания диалогово
 from dotenv import load_dotenv  # Для загрузки переменных окружения из .env
 
 # Импортируем наш логгер
-from setup import logger  # Логгер для записи событий
+from setup import get_logger  # Логгер для записи событий
 
 # Загружаем переменные окружения из .env (если файл существует)
 load_dotenv()
 
 BITRIX_MAX_RETRIES = int(os.getenv("BITRIX_MAX_RETRIES", "3"))
 BITRIX_RETRY_BASE_DELAY = float(os.getenv("BITRIX_RETRY_BASE_DELAY", "1"))
+logger = get_logger(__file__)
 
 
 def build_lead_url(webhook_url: str, lead_id: str | int) -> str:
@@ -257,7 +258,7 @@ def upload_leads_to_bitrix(leads: list[Dict[str, Any]], config: Dict[str, str]) 
             lead_url = send_to_bitrix24(lead, config)
             if lead_url:
                 success += 1
-                print(f"Создан лид {lead['phone']} {lead_url}")
+                print(f"{lead_url}")
             else:
                 print(f"Не удалось создать лид {index}/{total}: {lead['phone']}")
             

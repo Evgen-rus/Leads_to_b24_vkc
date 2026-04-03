@@ -50,5 +50,9 @@ credentials/
 database/
 amo/tokens.json
 
+# Database
+*.db
+
+# Text files
 поля.txt
 статус.txt
